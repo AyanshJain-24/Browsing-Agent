@@ -1,0 +1,15 @@
+{
+  "name": "voice-browser-agent-workspace",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix extension run dev",
+    "dev:backend": "npm --prefix backend run dev",
+    "start:backend": "npm --prefix backend start",
+    "build": "npm --prefix extension run build",
+    "preview": "npm --prefix extension run preview",
+    "test:backend": "npm --prefix backend test",
+    "test:extension": "npm --prefix extension test",
+    "test": "npm --prefix backend test && npm --prefix extension test"
+  }
+}

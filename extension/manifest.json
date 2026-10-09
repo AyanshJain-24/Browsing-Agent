@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Voice Browser Agent",
+  "version": "1.0.0",
+  "description": "Voice-first AI browser agent for Chrome to automate web tasks.",
+  "action": {
+    "default_title": "Voice Browser Agent"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "permissions": [
+    "sidePanel",
+    "tabs",
+    "storage",
+    "activeTab"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  }
+}
