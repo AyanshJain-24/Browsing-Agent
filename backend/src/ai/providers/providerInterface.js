@@ -12,13 +12,15 @@ export class ProviderError extends Error {
    * @param {string} [options.code] - e.g. 'RATE_LIMIT', 'TIMEOUT', 'INVALID_CREDENTIALS', 'PROVIDER_UNAVAILABLE'
    * @param {number} [options.status] - HTTP status code
    * @param {boolean} [options.retryable] - Whether caller may retry
+   * @param {Array} [options.attempts] - Call history across model attempts
    */
-  constructor(message, { code = 'PROVIDER_ERROR', status = 500, retryable = false } = {}) {
+  constructor(message, { code = 'PROVIDER_ERROR', status = 500, retryable = false, attempts = [] } = {}) {
     super(message);
     this.name = 'ProviderError';
     this.code = code;
     this.status = status;
     this.retryable = retryable;
+    this.attempts = attempts;
   }
 }
 

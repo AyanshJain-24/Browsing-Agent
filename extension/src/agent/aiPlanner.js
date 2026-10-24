@@ -12,9 +12,20 @@
  */
 
 import { aiClient } from './aiClient.js';
-import { isSensitiveAction } from './planner.js';
+import { isSensitiveAction, extractClickTarget, findClickableElements, isWeakOrUnrelatedMatch } from './planner.js';
 
 export const ALLOWED_ACTIONS = new Set(['click', 'type', 'select', 'scroll', 'presskey', 'navigate']);
+
+/**
+ * Detects whether a command is a page summarization or informational reading query.
+ * @param {string} goal
+ * @returns {boolean}
+ */
+export function isSummarizationGoal(goal = '') {
+  if (!goal || typeof goal !== 'string') return false;
+  const g = goal.toLowerCase();
+  return /\b(summarize|summary|overview|what is (?:this|the) page|tell me about|explain (?:this|the) page|read (?:this|the) page|main heading|heading of this page|content of this page|what does (?:this|the) page say|key points|bullet points)\b/i.test(g);
+}
 
 /**
  * Plans the next browser action using LLM reasoning.
@@ -48,8 +59,33 @@ export async function planWithAI(rawGoal, snapshot, taskState, options = {}) {
     };
   }
 
+  if (!snapshot || !snapshot.page) {
+    return {
+      status: 'ERROR',
+      error: 'Cannot plan action: webpage observation is unavailable.'
+    };
+  }
+
   // Pre-flight security guardrail: block sensitive financial or destructive actions
   if (isSensitiveAction(goal)) {
+    const isDeleteAccount = /\b(delete\s+(?:my\s+)?(?:user\s+)?account|delete\s+account)\b/i.test(goal);
+    if (isDeleteAccount) {
+      const allElements = [
+        ...(snapshot.interactive?.buttons || snapshot.buttons || []),
+        ...(snapshot.interactive?.links || snapshot.links || [])
+      ];
+      const hasDeleteBtn = allElements.some((e) => {
+        const text = (e.text || e.ariaLabel || e.title || '').toLowerCase();
+        return text.includes('delete') && text.includes('account') && !isWeakOrUnrelatedMatch(e, 'delete account');
+      });
+      if (!hasDeleteBtn) {
+        return {
+          status: 'ERROR',
+          error: 'Button not found on the current page.'
+        };
+      }
+    }
+
     return {
       status: 'WAITING_FOR_APPROVAL',
       requiresApproval: true,
@@ -57,12 +93,6 @@ export async function planWithAI(rawGoal, snapshot, taskState, options = {}) {
     };
   }
 
-  if (!snapshot || !snapshot.page) {
-    return {
-      status: 'ERROR',
-      error: 'Cannot plan action: webpage observation is unavailable.'
-    };
-  }
 
   // Extract compact execution history from taskState
   const history = taskState?.actions?.map((a) => ({
@@ -71,13 +101,39 @@ export async function planWithAI(rawGoal, snapshot, taskState, options = {}) {
     state: a.state
   })) || [];
 
+  // For page summarization, optimize page context: send page metadata, headings, and readable paragraphs
+  // without serializing dozens of interactive buttons, links, and forms to eliminate bloat and timeouts
+  let observationToSend = snapshot;
+  if (isSummarizationGoal(goal)) {
+    const rawHeadings = snapshot.content?.headings || [];
+    const mainHeading = rawHeadings.find((h) => h.tag === 'h1' || h.level === 1) || rawHeadings[0];
+    observationToSend = {
+      page: {
+        ...snapshot.page,
+        mainHeading: mainHeading?.text || undefined
+      },
+      content: {
+        headings: rawHeadings.slice(0, 12).map((h) => ({ id: h.id, text: (h.text || '').slice(0, 120), tag: h.tag })),
+        paragraphs: (snapshot.content?.paragraphs || [])
+          .slice(0, 10)
+          .map((p) => (typeof p === 'string' ? p : p.text || '').slice(0, 250))
+          .filter(Boolean)
+      },
+      interactive: { inputs: [], buttons: [], links: [] }
+    };
+  }
+
   // Call AI Planning backend
   const aiResponse = await aiClient.requestPlan({
     goal,
-    observation: snapshot,
+    observation: observationToSend,
     history,
+    conversationHistory: options.conversationHistory || [],
     lastFailure: options.lastFailure || null,
-    provider: options.provider
+    provider: options.provider,
+    taskId: taskState?.taskId,
+    signal: options.signal,
+    timeoutMs: options.timeoutMs
   });
 
   if (!aiResponse || !aiResponse.success) {
@@ -148,11 +204,30 @@ export async function planWithAI(rawGoal, snapshot, taskState, options = {}) {
         };
       }
 
+      // Check for weak or unrelated matches on candidate element (Requirement 5)
+      if (plannedAction.elementId) {
+        const allElements = [
+          ...(snapshot.interactive?.buttons || snapshot.buttons || []),
+          ...(snapshot.interactive?.links || snapshot.links || []),
+          ...(snapshot.interactive?.inputs || snapshot.inputs || [])
+        ];
+        const matchedElem = allElements.find((e) => e.id === plannedAction.elementId);
+        const clickTarget = extractClickTarget(goal);
+        if (clickTarget && matchedElem && isWeakOrUnrelatedMatch(matchedElem, clickTarget)) {
+          return {
+            status: 'ERROR',
+            error: 'Button not found on the current page.',
+            metrics
+          };
+        }
+      }
+
       // Check if action text or target indicates sensitive transaction
       if (
         isSensitiveAction(plannedAction.targetText) ||
         isSensitiveAction(plannedAction.text) ||
-        isSensitiveAction(plannedAction.url)
+        isSensitiveAction(plannedAction.url) ||
+        isSensitiveAction(goal)
       ) {
         return {
           status: 'WAITING_FOR_APPROVAL',

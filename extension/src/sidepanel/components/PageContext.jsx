@@ -1,14 +1,21 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { getPageSnapshot, isExtensionEnvironment } from '../utils/chromeMessaging.js';
+import {
+  getPageSnapshot,
+  isExtensionEnvironment,
+  isRestrictedUrl,
+  openWebsiteAndObserve,
+  RESTRICTED_PAGE_MESSAGE
+} from '../utils/chromeMessaging.js';
 
-export default function PageContext() {
+export default function PageContext({ onPageChange }) {
   const [context, setContext] = useState({
-    site: 'Amazon',
-    url: 'amazon.in',
-    pageType: 'Search results',
-    status: 'Connected',
-    faviconLetter: 'A',
+    site: 'Active Webpage',
+    url: '',
+    pageType: 'Web tab',
+    status: 'Connecting...',
+    faviconLetter: 'W',
     isLive: false,
+    isRestricted: false,
     errorMessage: '',
     summary: {
       inputs: 0,
@@ -21,30 +28,36 @@ export default function PageContext() {
   });
 
   const [isLoading, setIsLoading] = useState(false);
+  const [isOpeningWebsite, setIsOpeningWebsite] = useState(false);
   const debounceTimerRef = useRef(null);
   const currentScanIdRef = useRef(0);
+  const isRestrictedRef = useRef(false);
+  const lastScannedUrlRef = useRef('');
 
   // Fetch live page snapshot from active tab via Service Worker -> Content Script -> observer.js
   const refreshPageSnapshot = useCallback(async () => {
     if (!isExtensionEnvironment()) {
       // In standalone Vite dev server (localhost:5173), keep mock preview
-      setContext((prev) => ({
-        ...prev,
-        site: 'Amazon (Mock)',
-        url: 'amazon.in',
+      const mockContext = {
+        site: 'Example Domain (Preview)',
+        url: 'https://example.com',
         pageType: 'Mock Preview',
         status: 'Mock connected',
-        faviconLetter: 'A',
+        faviconLetter: 'E',
         isLive: false,
+        isRestricted: false,
+        errorMessage: '',
         summary: {
-          inputs: 3,
-          buttons: 5,
-          links: 18,
-          forms: 1,
-          totalLinks: 42,
-          returnedLinks: 18
+          inputs: 0,
+          buttons: 2,
+          links: 4,
+          forms: 0,
+          totalLinks: 4,
+          returnedLinks: 4
         }
-      }));
+      };
+      setContext(mockContext);
+      onPageChange?.(mockContext);
       return;
     }
 
@@ -64,13 +77,17 @@ export default function PageContext() {
         const page = data.page || {};
         const summary = data.summary || {};
 
-        setContext({
+        isRestrictedRef.current = false;
+        lastScannedUrlRef.current = page.url || '';
+
+        const nextContext = {
           site: page.title ? page.title.slice(0, 32) : page.hostname || 'Active Webpage',
           url: page.url || page.hostname || '',
           pageType: 'Live tab',
           status: 'Connected',
           faviconLetter: (page.title ? page.title.charAt(0) : page.hostname?.charAt(0) || 'W').toUpperCase(),
           isLive: true,
+          isRestricted: false,
           errorMessage: '',
           summary: {
             inputs: summary.inputCount ?? (data.interactive?.inputs?.length || 0),
@@ -80,30 +97,64 @@ export default function PageContext() {
             totalLinks: summary.totalLinks ?? (summary.linkCount || 0),
             returnedLinks: summary.returnedLinks ?? (data.interactive?.links?.length || 0)
           }
-        });
+        };
+        setContext(nextContext);
+        onPageChange?.(nextContext);
       } else {
-        // Handle restricted pages (chrome://, webstore) or unloaded content scripts gracefully
-        const errMsg = response?.error || 'Page unavailable';
-        setContext({
-          site: 'Page unavailable',
-          url: response?.url || 'Restricted browser page',
-          pageType: 'Unavailable',
-          status: 'Restricted',
-          faviconLetter: '!',
-          isLive: false,
-          errorMessage: errMsg,
-          summary: {
-            inputs: 0,
-            buttons: 0,
-            links: 0,
-            forms: 0,
-            totalLinks: 0,
-            returnedLinks: 0
-          }
-        });
+        // Handle restricted pages (chrome://, chrome://extensions/, webstore) gracefully
+        const isRestricted = Boolean(response?.isRestricted || isRestrictedUrl(response?.url));
+        if (isRestricted) {
+          isRestrictedRef.current = true;
+          lastScannedUrlRef.current = response?.url || 'chrome://newtab/';
+
+          const nextContext = {
+            site: 'Privileged Chrome Page',
+            url: response?.url || 'chrome://newtab/',
+            pageType: 'Restricted',
+            status: 'Restricted',
+            faviconLetter: '🔒',
+            isLive: false,
+            isRestricted: true,
+            errorMessage: RESTRICTED_PAGE_MESSAGE,
+            summary: {
+              inputs: 0,
+              buttons: 0,
+              links: 0,
+              forms: 0,
+              totalLinks: 0,
+              returnedLinks: 0
+            }
+          };
+          setContext(nextContext);
+          onPageChange?.(nextContext);
+        } else {
+          isRestrictedRef.current = false;
+          const errMsg = response?.error || 'Page unavailable';
+          const nextContext = {
+            site: 'Page unavailable',
+            url: response?.url || '',
+            pageType: 'Unavailable',
+            status: 'Disconnected',
+            faviconLetter: '!',
+            isLive: false,
+            isRestricted: false,
+            errorMessage: errMsg,
+            summary: {
+              inputs: 0,
+              buttons: 0,
+              links: 0,
+              forms: 0,
+              totalLinks: 0,
+              returnedLinks: 0
+            }
+          };
+          setContext(nextContext);
+          onPageChange?.(nextContext);
+        }
       }
     } catch (err) {
       if (scanId !== currentScanIdRef.current) return;
+      isRestrictedRef.current = false;
       setContext({
         site: 'Error reading page',
         url: '',
@@ -126,10 +177,60 @@ export default function PageContext() {
         setIsLoading(false);
       }
     }
-  }, []);
+  }, [onPageChange]);
+
+  // Requirement 3: Action that opens a normal website such as https://www.wikipedia.org in a new tab,
+  // then observes it after loading.
+  const handleOpenNormalWebsite = useCallback(async (targetUrl = 'https://www.wikipedia.org') => {
+    setIsOpeningWebsite(true);
+    try {
+      if (!isExtensionEnvironment()) {
+        const mockLoaded = {
+          site: 'Wikipedia, the free encyclopedia',
+          url: targetUrl,
+          pageType: 'Live tab',
+          status: 'Connected',
+          faviconLetter: 'W',
+          isLive: true,
+          isRestricted: false,
+          errorMessage: '',
+          summary: {
+            inputs: 1,
+            buttons: 3,
+            links: 12,
+            forms: 1,
+            totalLinks: 12,
+            returnedLinks: 12
+          }
+        };
+        isRestrictedRef.current = false;
+        lastScannedUrlRef.current = targetUrl;
+        setContext(mockLoaded);
+        onPageChange?.(mockLoaded);
+        return;
+      }
+
+      const res = await openWebsiteAndObserve(targetUrl);
+      if (res && res.success) {
+        isRestrictedRef.current = false;
+        lastScannedUrlRef.current = '';
+        await refreshPageSnapshot();
+      }
+    } catch (err) {
+      console.warn('[PageContext] Failed to open website:', err);
+    } finally {
+      setIsOpeningWebsite(false);
+    }
+  }, [onPageChange, refreshPageSnapshot]);
 
   // Debounced refresh scheduler to avoid duplicate scanning bursts (150-250ms debounce)
-  const triggerDebouncedRefresh = useCallback((immediateReset = false) => {
+  // Requirement 4: Do not repeatedly retry scanning a restricted page.
+  const triggerDebouncedRefresh = useCallback((immediateReset = false, force = false) => {
+    if (!force && isRestrictedRef.current && !immediateReset) {
+      // Avoid repeatedly re-scanning when already on a known restricted page
+      return;
+    }
+
     if (immediateReset) {
       // Immediately clear stale page info when switching tabs
       setContext((prev) => ({
@@ -174,9 +275,15 @@ export default function PageContext() {
 
       if (message.type === 'ACTIVE_TAB_CHANGED') {
         // Tab switch (Tab A -> Tab B): wipe stale data immediately and schedule scan
-        triggerDebouncedRefresh(true);
+        // Requirement 7: When user switches to a normal website, automatically reconnect
+        isRestrictedRef.current = false;
+        lastScannedUrlRef.current = '';
+        triggerDebouncedRefresh(true, true);
       } else if (message.type === 'ACTIVE_TAB_UPDATED') {
-        // Navigation completed or SPA route change: schedule debounced scan
+        // Requirement 4: Do not repeatedly retry scanning the same restricted page
+        if (message.isRestricted && isRestrictedRef.current && (message.url === lastScannedUrlRef.current || !message.url)) {
+          return;
+        }
         triggerDebouncedRefresh(false);
       }
     };
@@ -184,9 +291,18 @@ export default function PageContext() {
     chrome.runtime.onMessage.addListener(handleRuntimeMessage);
 
     // 3. Direct tab events as secondary listener for maximum responsiveness
-    const handleTabActivated = () => triggerDebouncedRefresh(true);
+    const handleTabActivated = () => {
+      isRestrictedRef.current = false;
+      lastScannedUrlRef.current = '';
+      triggerDebouncedRefresh(true, true);
+    };
+
     const handleTabUpdated = (tabId, changeInfo) => {
       if (changeInfo.status === 'complete' || changeInfo.url) {
+        if (isRestrictedRef.current && !changeInfo.url) {
+          // Avoid repeated scanning of already-restricted page on status updates
+          return;
+        }
         triggerDebouncedRefresh(false);
       }
     };
@@ -214,6 +330,7 @@ export default function PageContext() {
 
   const isConnected = context.status === 'Connected' || context.status === 'Mock connected';
   const isSyncing = context.status === 'Syncing';
+  const isRestricted = Boolean(context.isRestricted || context.status === 'Restricted');
 
   return (
     <section className="page-context-section" aria-label="Current browser context">
@@ -228,6 +345,8 @@ export default function PageContext() {
                 height: 6,
                 backgroundColor: isConnected
                   ? 'var(--status-success)'
+                  : isRestricted
+                  ? '#38bdf8'
                   : isSyncing
                   ? 'var(--accent-primary)'
                   : 'var(--status-warning)'
@@ -238,6 +357,8 @@ export default function PageContext() {
               style={{
                 color: isConnected
                   ? 'var(--status-success)'
+                  : isRestricted
+                  ? '#38bdf8'
                   : isSyncing
                   ? 'var(--accent-primary)'
                   : 'var(--status-warning)'
@@ -317,8 +438,72 @@ export default function PageContext() {
         </div>
       )}
 
-      {/* Restricted Page Warning if on chrome:// or error */}
-      {!isConnected && !isSyncing && context.errorMessage && (
+      {/* Requirement 2 & 3: Friendly Informational Box for Restricted Browser Pages with "Open a Website" action */}
+      {isRestricted && (
+        <div
+          className="restricted-page-banner"
+          style={{
+            marginTop: 8,
+            padding: '10px 12px',
+            background: 'rgba(56, 189, 248, 0.08)',
+            border: '1px solid rgba(56, 189, 248, 0.25)',
+            borderRadius: 'var(--radius-sm, 8px)',
+            fontSize: '11.5px',
+            color: 'var(--text-primary, #f1f5f9)',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 8,
+            lineHeight: 1.4
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
+            <span style={{ fontSize: '15px', lineHeight: 1 }} aria-hidden="true">🔒</span>
+            <span style={{ color: 'var(--text-secondary, #94a3b8)', fontSize: '11.5px' }}>
+              {RESTRICTED_PAGE_MESSAGE}
+            </span>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}>
+            <button
+              type="button"
+              className="btn-open-website"
+              onClick={() => handleOpenNormalWebsite('https://www.wikipedia.org')}
+              disabled={isOpeningWebsite}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                background: 'var(--accent-primary, #6366f1)',
+                color: '#ffffff',
+                border: 'none',
+                borderRadius: '6px',
+                padding: '6px 12px',
+                fontSize: '11.5px',
+                fontWeight: 600,
+                cursor: isOpeningWebsite ? 'not-allowed' : 'pointer',
+                opacity: isOpeningWebsite ? 0.7 : 1,
+                boxShadow: '0 1px 3px rgba(99, 102, 241, 0.3)',
+                transition: 'all 0.2s ease'
+              }}
+              title="Open https://www.wikipedia.org in a new tab"
+              aria-label="Open a Website"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
+                <path d="M2 12h20" />
+              </svg>
+              <span>{isOpeningWebsite ? 'Opening Wikipedia...' : 'Open a Website'}</span>
+            </button>
+            <span style={{ fontSize: '10.5px', color: 'var(--text-muted, #64748b)' }}>
+              (e.g. Wikipedia)
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Regular Error Warning if not connected and not restricted */}
+      {!isConnected && !isSyncing && !isRestricted && context.errorMessage && (
         <p
           style={{
             fontSize: '10.5px',

@@ -22,7 +22,7 @@
  * - Returns structured, predictable result objects: { success: boolean, action: string, ... }
  */
 
-import { getRegisteredElement } from './observer.js';
+import { getRegisteredElement, isVisible, querySelectorAllDeep, getElementAccessibleName } from './observer.js';
 
 // Observability prefix for console logging
 const LOG_PREFIX = '[Executor]';
@@ -41,32 +41,124 @@ function log(message, isError = false) {
 }
 
 /**
+ * Attempts to re-resolve a stale or detached DOM element using the command's target metadata
+ * (dataTestId, targetHref, targetText, ariaLabel, selector).
+ * Vital for single-page applications (React, Vue) that re-render and replace DOM nodes.
+ * 
+ * @param {Object} command
+ * @returns {Element|null}
+ */
+export function reResolveElement(command) {
+  if (!command || typeof command !== 'object') return null;
+
+  // 1. Re-resolve by explicit selector if provided
+  if (command.selector) {
+    try {
+      const nodes = querySelectorAllDeep(command.selector, document);
+      for (const node of nodes) {
+        if (node.isConnected && isVisible(node)) return node;
+      }
+    } catch {
+      // Ignore selector errors
+    }
+  }
+
+  // 2. Re-resolve by data-testid
+  if (command.dataTestId) {
+    try {
+      const escaped = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(command.dataTestId) : command.dataTestId;
+      const nodes = querySelectorAllDeep(`[data-testid="${escaped}"]`, document);
+      for (const node of nodes) {
+        if (node.isConnected && isVisible(node)) return node;
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  // 3. Re-resolve by targetHref for links
+  if (command.targetHref) {
+    try {
+      const links = querySelectorAllDeep('a[href]', document);
+      for (const link of links) {
+        if (link.isConnected && isVisible(link) && (link.href === command.targetHref || link.getAttribute('href') === command.targetHref)) {
+          return link;
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  // 4. Re-resolve by accessible name or targetText
+  const targetText = (command.targetText || command.ariaLabel || '').trim().toLowerCase();
+  if (targetText) {
+    const candidates = querySelectorAllDeep('button, a, [role="button"], [role="menuitem"], [role="tab"], [role="checkbox"], input[type="button"], input[type="submit"], ytd-search-filter-renderer, tp-yt-paper-item', document);
+    
+    // First pass: exact accessible name match
+    for (const el of candidates) {
+      if (!el.isConnected || !isVisible(el)) continue;
+      const accName = getElementAccessibleName(el).toLowerCase().trim();
+      const rawText = (el.textContent || '').toLowerCase().trim();
+      const aria = (el.getAttribute('aria-label') || '').toLowerCase().trim();
+      const title = (el.getAttribute('title') || '').toLowerCase().trim();
+
+      if (accName === targetText || rawText === targetText || aria === targetText || title === targetText) {
+        return el;
+      }
+    }
+
+    // Second pass: startsWith or substring match
+    for (const el of candidates) {
+      if (!el.isConnected || !isVisible(el)) continue;
+      const accName = getElementAccessibleName(el).toLowerCase().trim();
+      if (accName && (accName.startsWith(targetText) || accName.includes(targetText) || targetText.includes(accName))) {
+        return el;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
  * Resolves a temporary snapshot identifier (e.g. "element-1") to an active DOM element.
  * Validates element presence, attachment to the document, and interactability.
+ * If the element has detached due to a dynamic SPA re-render, attempts live re-resolution.
  * 
  * @param {string} elementId - Temporary ID assigned by observer.js
+ * @param {Object} [command] - Optional command metadata for stale reference recovery
  * @returns {{ element?: Element, error?: string }}
  */
-function resolveElement(elementId) {
+export function resolveElement(elementId, command = null) {
   if (!elementId || typeof elementId !== 'string') {
     return { error: "Missing or invalid 'elementId' parameter" };
   }
 
   const element = getRegisteredElement(elementId);
+  if (element && element.isConnected) {
+    return { element };
+  }
+
+  // Element missing from registry or detached (e.g. React/Vue re-rendered before execution).
+  // Attempt live re-resolution from command metadata if available.
+  if (command && typeof command === 'object') {
+    const recovered = reResolveElement(command);
+    if (recovered) {
+      log(`Re-resolved stale element '${elementId}' to live DOM node <${recovered.tagName.toLowerCase()}>`);
+      return { element: recovered };
+    }
+  }
+
   if (!element) {
     return {
       error: `Element '${elementId}' not found in registry. The page may have changed or the element was never registered.`
     };
   }
 
-  // Check if element is still attached to document tree (e.g. SPA re-render could detach it)
-  if (!element.isConnected) {
-    return {
-      error: `Element '${elementId}' is no longer attached to the document (stale DOM reference).`
-    };
-  }
-
-  return { element };
+  return {
+    error: `Element '${elementId}' is no longer attached to the document (stale DOM reference).`
+  };
 }
 
 // ============================================================================
@@ -75,20 +167,28 @@ function resolveElement(elementId) {
 
 /**
  * Executes a click action on a registered element.
+ * Validates visibility, enabled state, scrolls into view, and dispatches full pointer/mouse sequence.
  * 
- * @param {Object} command - { action: "click", elementId: "element-7" }
+ * @param {Object} command - { action: "click", elementId: "element-7", ... }
  * @returns {Promise<Object>}
  */
 async function handleClick(command) {
   const { elementId } = command;
-  const { element, error } = resolveElement(elementId);
+  const { element, error } = resolveElement(elementId, command);
   if (error) {
     log(`Click failed: ${error}`, true);
     return { success: false, action: 'click', elementId, error };
   }
 
+  // Check visibility immediately before execution
+  if (!isVisible(element)) {
+    const hiddenMsg = `Element '${elementId}' is hidden or not visible`;
+    log(`Click failed: ${hiddenMsg}`, true);
+    return { success: false, action: 'click', elementId, error: hiddenMsg };
+  }
+
   // Check if disabled
-  if (element.disabled || element.getAttribute('aria-disabled') === 'true') {
+  if (element.disabled || element.getAttribute('aria-disabled') === 'true' || element.closest?.('fieldset[disabled]')) {
     const disabledMsg = `Element '${elementId}' is disabled`;
     log(`Click failed: ${disabledMsg}`, true);
     return { success: false, action: 'click', elementId, error: disabledMsg };
@@ -96,24 +196,41 @@ async function handleClick(command) {
 
   try {
     // 1. Scroll element into viewport center
-    element.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+    if (typeof element.scrollIntoView === 'function') {
+      element.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+    }
 
-    // 2. Focus element if focusable
-    if (typeof element.focus === 'function') {
+    // 2. Resolve interactive target node (handles custom web components like ytd-search-filter-renderer)
+    const clickTarget = element.querySelector('a, button, [role="button"], [role="menuitem"], [role="checkbox"]') || element;
+    if (typeof clickTarget.focus === 'function') {
+      clickTarget.focus();
+    } else if (typeof element.focus === 'function') {
       element.focus();
     }
 
-    // 3. Dispatch standard mouse interaction events for modern web apps
-    element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-    element.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-    element.click();
+    // 3. Dispatch standard pointer and mouse interaction events for modern web apps
+    const eventInit = { bubbles: true, cancelable: true, view: window };
+    if (typeof PointerEvent !== 'undefined') {
+      clickTarget.dispatchEvent(new PointerEvent('pointerdown', eventInit));
+    }
+    clickTarget.dispatchEvent(new MouseEvent('mousedown', eventInit));
+    if (typeof PointerEvent !== 'undefined') {
+      clickTarget.dispatchEvent(new PointerEvent('pointerup', eventInit));
+    }
+    clickTarget.dispatchEvent(new MouseEvent('mouseup', eventInit));
+    clickTarget.click();
+    if (clickTarget !== element && typeof element.click === 'function') {
+      element.click();
+    }
 
-    log(`Clicked ${elementId} (<${element.tagName.toLowerCase()}>)`);
+    const textSnippet = (element.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 100);
+    log(`Clicked ${elementId} (<${element.tagName.toLowerCase()}>${textSnippet ? ` "${textSnippet}"` : ''})`);
     return {
       success: true,
       action: 'click',
       elementId,
-      tag: element.tagName.toLowerCase()
+      tag: element.tagName.toLowerCase(),
+      targetText: textSnippet
     };
   } catch (err) {
     const errMsg = `Click execution failed: ${err.message}`;
@@ -137,7 +254,7 @@ async function handleClick(command) {
 async function handleType(command) {
   const { elementId } = command;
   const text = command.text ?? command.value ?? '';
-  const { element, error } = resolveElement(elementId);
+  const { element, error } = resolveElement(elementId, command);
   if (error) {
     log(`Type failed: ${error}`, true);
     return { success: false, action: 'type', elementId, error };
@@ -227,7 +344,7 @@ async function handleType(command) {
 async function handleSelect(command) {
   const { elementId } = command;
   const targetValue = String(command.value ?? command.text ?? '').trim();
-  const { element, error } = resolveElement(elementId);
+  const { element, error } = resolveElement(elementId, command);
   if (error) {
     log(`Select failed: ${error}`, true);
     return { success: false, action: 'select', elementId, error };
@@ -315,7 +432,7 @@ async function handleScroll(command) {
   // Scenario A: Scroll a specific element into view
   if (command.elementId) {
     const { elementId } = command;
-    const { element, error } = resolveElement(elementId);
+    const { element, error } = resolveElement(elementId, command);
     if (error) {
       log(`Scroll failed: ${error}`, true);
       return { success: false, action: 'scroll', elementId, error };
@@ -370,7 +487,7 @@ async function handlePressKey(command) {
   // Resolve target element or fall back to active element
   let target = document.activeElement || document.body;
   if (command.elementId) {
-    const { element, error } = resolveElement(command.elementId);
+    const { element, error } = resolveElement(command.elementId, command);
     if (!error && element) {
       target = element;
       if (typeof target.focus === 'function') target.focus();

@@ -10,7 +10,7 @@ const DEFAULT_BACKEND_URL = 'http://localhost:3001';
 export class AIClient {
   constructor(options = {}) {
     this.backendUrl = options.backendUrl || DEFAULT_BACKEND_URL;
-    this.timeoutMs = options.timeoutMs || 25000;
+    this.timeoutMs = options.timeoutMs || 30000;
     this.sessionMetrics = {
       callsCount: 0,
       totalPromptTokens: 0,
@@ -65,6 +65,25 @@ export class AIClient {
   }
 
   /**
+   * Fetches aggregated token metrics for a specific taskId.
+   * @param {string} taskId
+   * @returns {Promise<Object|null>}
+   */
+  async getTaskMetrics(taskId) {
+    if (!taskId) return null;
+    try {
+      const res = await fetch(`${this.backendUrl}/api/tasks/${encodeURIComponent(taskId)}/metrics`, {
+        signal: AbortSignal.timeout(5000)
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data?.metrics || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Sends user goal, live page observation, and execution history to backend for AI planning.
    * 
    * @param {Object} params
@@ -77,21 +96,53 @@ export class AIClient {
    *   success: boolean,
    *   plan?: Object,
    *   metrics?: Object,
+   * @param {string} [params.taskId] - Task ID for per-task token metrics accounting
+   * @returns {Promise<{
+   *   success: boolean,
+   *   plan?: Object,
+   *   metrics?: Object,
+   *   taskMetrics?: Object,
+   * @param {Array} [params.conversationHistory] - Recent conversation turns
+   * @param {string} [params.taskId] - Task ID for per-task token metrics accounting
+   * @returns {Promise<{
+   *   success: boolean,
+   *   plan?: Object,
+   *   metrics?: Object,
+   *   taskMetrics?: Object,
    *   error?: string,
    *   code?: string
    * }>}
    */
-  async requestPlan({ goal, observation, history = [], lastFailure = null, provider = undefined }) {
+  async requestPlan({ goal, observation, history = [], conversationHistory = [], lastFailure = null, provider = undefined, taskId = undefined, signal = undefined, timeoutMs = undefined }) {
+    if (signal?.aborted) {
+      return {
+        success: false,
+        error: 'Task was cancelled.',
+        code: 'CANCELLED',
+        retryable: false
+      };
+    }
+
     const endpoint = `${this.backendUrl}/api/plan`;
     const payload = {
       goal,
       observation,
       history,
+      ...(Array.isArray(conversationHistory) && conversationHistory.length > 0 ? { conversationHistory } : {}),
       lastFailure,
+      ...(taskId ? { taskId } : {}),
       ...(provider ? { provider } : {})
     };
 
+    const effectiveTimeout = timeoutMs || this.timeoutMs;
+    const timeoutSignal = AbortSignal.timeout(effectiveTimeout);
+    let requestSignal = timeoutSignal;
+    if (signal) {
+      requestSignal = typeof AbortSignal.any === 'function' ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+    }
+
     const startTime = Date.now();
+    console.log(`[AI_CLIENT] [${taskId || 'no-task'}] Sending POST /api/plan (timeout: ${effectiveTimeout}ms, goal: "${goal.slice(0, 60)}...")`);
 
     try {
       const response = await fetch(endpoint, {
@@ -100,7 +151,7 @@ export class AIClient {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(this.timeoutMs)
+        signal: requestSignal
       });
 
       const data = await response.json().catch(() => null);
@@ -108,6 +159,7 @@ export class AIClient {
       if (!response.ok || !data || data.success === false) {
         const errMsg = data?.error || `Backend planning service returned HTTP ${response.status}`;
         const errCode = data?.code || `HTTP_${response.status}`;
+        console.error(`[AI_CLIENT] [${taskId || 'no-task'}] Backend returned HTTP ${response.status} (${errCode}): ${errMsg}`);
 
         return {
           success: false,
@@ -127,9 +179,12 @@ export class AIClient {
       this.sessionMetrics.totalCompletionTokens += (data.metrics?.completionTokens || 0);
       this.sessionMetrics.totalTokens += (data.metrics?.totalTokens || 0);
 
+      console.log(`[AI_CLIENT] [${taskId || 'no-task'}] Plan received in ${latencyMs}ms. Model: ${data.metrics?.model}, fallback: ${Boolean(data.metrics?.fallbackOccurred)}, totalTokens: ${data.metrics?.totalTokens ?? 'N/A'}`);
+
       return {
         success: true,
         plan: data.plan,
+        taskMetrics: data.metrics?.taskMetrics || data.taskMetrics,
         metrics: {
           ...data.metrics,
           sessionCallsCount: this.sessionMetrics.callsCount,
@@ -137,19 +192,32 @@ export class AIClient {
         }
       };
     } catch (err) {
-      if (err.name === 'TimeoutError' || err.name === 'AbortError') {
+      const elapsed = Date.now() - startTime;
+      if (signal?.aborted) {
         return {
           success: false,
-          error: `AI reasoning request timed out after ${Math.round(this.timeoutMs / 1000)}s.`,
+          error: 'Task was cancelled by user.',
+          code: 'CANCELLED',
+          retryable: false
+        };
+      }
+
+      if (err.name === 'TimeoutError' || err.name === 'AbortError') {
+        console.error(`[AI_CLIENT] [${taskId || 'no-task'}] Frontend request timed out after ${elapsed}ms (limit: ${effectiveTimeout}ms)`);
+        return {
+          success: false,
+          error: `AI reasoning request timed out after ${Math.round(effectiveTimeout / 1000)}s.`,
           code: 'TIMEOUT',
           retryable: true
         };
       }
 
+      console.error(`[AI_CLIENT] [${taskId || 'no-task'}] Connection error after ${elapsed}ms: ${err.message}`);
+
       // Network / connection refused error
       return {
         success: false,
-        error: `Cannot connect to AI planning backend at ${this.backendUrl}. Please ensure the backend server is running with 'npm run dev:backend'. (${err.message})`,
+        error: `Cannot connect to AI planning backend at ${this.backendUrl}. Please ensure the backend server is running with 'npm run dev'. (${err.message})`,
         code: 'BACKEND_OFFLINE',
         retryable: false
       };

@@ -1491,3 +1491,316 @@ input:focus-visible {
   to { transform: rotate(360deg); }
 }
 
+/* ============================================================================
+   Phase 7 Conversational Voice Assistant Styles
+   ============================================================================ */
+
+.conversation-container {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+  margin-bottom: 14px;
+}
+
+.conversation-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.voice-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+}
+
+.voice-status-pill.listening {
+  background: var(--status-success-bg);
+  color: var(--status-success);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.voice-status-pill.processing {
+  background: var(--status-warning-bg);
+  color: var(--status-warning);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.voice-status-pill.speaking {
+  background: var(--accent-light);
+  color: var(--accent-primary);
+  border: 1px solid var(--accent-glow);
+}
+
+.voice-status-pill.stopped {
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  border: 1px solid var(--border-subtle);
+}
+
+.listening-dot {
+  background: var(--status-success);
+  box-shadow: 0 0 8px rgba(16, 185, 129, 0.8);
+}
+
+.processing-dot {
+  background: var(--status-warning);
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.8);
+}
+
+.conversation-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ctrl-btn {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.ctrl-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.btn-stop-mic {
+  background: var(--status-error-bg);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: var(--status-error);
+}
+
+.btn-stop-mic:hover {
+  background: var(--status-error);
+  color: #ffffff;
+}
+
+.btn-start-mic {
+  background: var(--status-success-bg);
+  border-color: rgba(16, 185, 129, 0.4);
+  color: var(--status-success);
+}
+
+.btn-start-mic:hover {
+  background: var(--status-success);
+  color: #ffffff;
+}
+
+.stop-speaking-btn {
+  background: var(--accent-light);
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.stop-speaking-btn:hover {
+  background: var(--accent-primary);
+  color: #ffffff;
+}
+
+.conversation-feed {
+  display: flex;
+  flex-direction: column;
+  padding: 12px;
+  min-height: 140px;
+  max-height: 280px;
+  overflow-y: auto;
+  gap: 10px;
+}
+
+.conversation-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 20px 10px;
+  color: var(--text-muted);
+}
+
+.empty-chat-icon {
+  font-size: 28px;
+  margin-bottom: 6px;
+  opacity: 0.7;
+}
+
+.empty-chat-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+
+.empty-chat-subtitle {
+  font-size: 11px;
+  margin-bottom: 10px;
+}
+
+.sample-prompts {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: 100%;
+  max-width: 240px;
+}
+
+.sample-chip {
+  font-size: 11px;
+  background: var(--bg-secondary);
+  border: 1px dashed var(--border-color);
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  cursor: default;
+}
+
+.chat-bubble-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  width: 100%;
+}
+
+.chat-bubble-row.user-row {
+  justify-content: flex-end;
+}
+
+.chat-bubble-row.assistant-row {
+  justify-content: flex-start;
+}
+
+.avatar-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  flex-shrink: 0;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+}
+
+.chat-bubble {
+  max-width: 82%;
+  padding: 9px 12px;
+  border-radius: var(--radius-md);
+  font-size: 12.5px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.user-bubble {
+  background: var(--accent-primary);
+  color: #ffffff;
+  border-bottom-right-radius: 2px;
+}
+
+.assistant-bubble {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-bottom-left-radius: 2px;
+}
+
+.bubble-title {
+  font-weight: 700;
+  font-size: 12px;
+  margin-bottom: 3px;
+  color: var(--accent-primary);
+}
+
+.bubble-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  border-top: 1px dashed var(--border-subtle);
+  padding-top: 3px;
+}
+
+.bubble-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 5px;
+  font-size: 10px;
+  opacity: 0.8;
+}
+
+.replay-speech-btn {
+  background: transparent;
+  border: none;
+  color: var(--accent-primary);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.replay-speech-btn:hover {
+  text-decoration: underline;
+}
+
+.interim-bubble {
+  background: rgba(79, 70, 229, 0.08);
+  border: 1px dashed var(--accent-primary);
+  color: var(--text-primary);
+}
+
+.blinking-cursor {
+  animation: blink 0.8s infinite;
+  margin-left: 2px;
+  font-weight: bold;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.waiting-followup-pill {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 6px 12px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-full);
+  align-self: center;
+  margin-top: 4px;
+  animation: fadeIn 0.3s ease;
+}
+
+.followup-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status-success);
+  animation: pulse 1.5s infinite;
+}
+
+

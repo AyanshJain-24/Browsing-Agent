@@ -1,14 +1,16 @@
 import React from 'react';
 
-const DEFAULT_ACTIONS = [
-  { id: 1, label: 'Opened Amazon', state: 'completed', meta: '0.4s • Tab #104' },
-  { id: 2, label: 'Searched "laptop under ₹50,000"', state: 'completed', meta: '1.2s • Form submitted' },
-  { id: 3, label: 'Applied price & rating filter', state: 'completed', meta: '0.9s • 16GB RAM + 4★' },
-  { id: 4, label: 'Comparing top 4 search results', state: 'active', meta: 'Analyzing customer reviews' },
-  { id: 5, label: 'Select best value option', state: 'pending', meta: 'Waiting for comparison' }
-];
-
-export default function ActionTimeline({ actions = DEFAULT_ACTIONS }) {
+export default function ActionTimeline({ actions = [] }) {
+  if (!actions || actions.length === 0) {
+    return (
+      <div className="timeline-card" aria-label="Browser action timeline">
+        <div className="timeline-title">Browser Action Timeline</div>
+        <div style={{ color: 'var(--text-muted)', fontSize: '12px', padding: '6px 0' }}>
+          No action steps recorded yet.
+        </div>
+      </div>
+    );
+  }
   const renderIcon = (state) => {
     switch (state) {
       case 'completed':

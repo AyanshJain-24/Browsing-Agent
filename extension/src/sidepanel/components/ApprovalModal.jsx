@@ -4,16 +4,17 @@ export default function ApprovalModal({
   isOpen,
   onApprove,
   onCancel,
-  website = 'amazon.in',
-  actionTitle = 'Apply discount coupon & Proceed to Checkout',
-  details = [
-    { label: 'Website', value: 'amazon.in' },
-    { label: 'Action', value: 'Submit order review' },
-    { label: 'Item', value: 'Acer Swift Go 14 (₹47,990)' },
-    { label: 'Payment', value: 'Pre-saved card •••• 4242' }
-  ]
+  website = 'active page',
+  actionTitle = 'Action requires approval',
+  details = []
 }) {
   if (!isOpen) return null;
+
+  const displayDetails = (details && details.length > 0) ? details : [
+    { label: 'Website', value: website || 'Active page' },
+    { label: 'Action', value: actionTitle || 'Consequential browser action' },
+    { label: 'Safety Policy', value: 'High-impact action requires explicit confirmation' }
+  ];
 
   return (
     <div
@@ -44,7 +45,7 @@ export default function ApprovalModal({
         </p>
 
         <div className="approval-details-box">
-          {details.map((d, i) => (
+          {displayDetails.map((d, i) => (
             <div key={i} className="detail-row">
               <span className="detail-label">{d.label}</span>
               <span className="detail-value">{d.value}</span>

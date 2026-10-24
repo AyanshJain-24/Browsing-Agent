@@ -109,6 +109,7 @@ export function createSpeechRecognizer(options = {}) {
   let silenceTimer = null;
   let silenceDurationMs = options.silenceDurationMs || 2500;
   let lang = options.lang || 'en-IN';
+  let isTemporarilyMuted = false;
   
   // Utterance tracking
   let priorFinalText = '';
@@ -239,6 +240,7 @@ export function createSpeechRecognizer(options = {}) {
       };
 
       recognition.onresult = (event) => {
+        if (isTemporarilyMuted) return;
         if (!event || !event.results) return;
         recognition._lastResultCount = event.results.length;
 
@@ -510,6 +512,35 @@ export function createSpeechRecognizer(options = {}) {
      */
     isHandsFree() {
       return handsFreeActive;
+    },
+
+    /**
+     * Temporarily mutes speech recognition input (e.g. while assistant is speaking)
+     * to eliminate audio feedback loops.
+     * @param {boolean} muted
+     */
+    setTemporarilyMuted(muted) {
+      isTemporarilyMuted = Boolean(muted);
+      if (isTemporarilyMuted) {
+        if (silenceTimer) {
+          clearTimeout(silenceTimer);
+          silenceTimer = null;
+        }
+        priorFinalText = '';
+        sessionFinalText = '';
+        sessionInterimText = '';
+        if (recognition && recognition._lastResultCount !== undefined) {
+          utteranceStartIndex = recognition._lastResultCount;
+        }
+      }
+    },
+
+    /**
+     * Returns whether recognition is temporarily muted.
+     * @returns {boolean}
+     */
+    isTemporarilyMuted() {
+      return isTemporarilyMuted;
     },
 
     /**

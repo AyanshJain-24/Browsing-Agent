@@ -13,18 +13,27 @@ import TaskCompleted from './components/TaskCompleted.jsx';
 import Metrics from './components/Metrics.jsx';
 import SettingsModal from './components/SettingsModal.jsx';
 import DevStateSwitcher from './components/DevStateSwitcher.jsx';
+import ConversationView from './components/ConversationView.jsx';
 import {
   createSpeechRecognizer,
   isSpeechRecognitionSupported,
   requestMicrophonePermission
 } from './utils/speechRecognition.js';
+import { ttsController, isSpeechSynthesisSupported } from './utils/tts.js';
 import { agentController } from '../agent/agentController.js';
 import { TaskStatus } from '../agent/taskState.js';
 import { aiClient } from '../agent/aiClient.js';
+import { RESTRICTED_PAGE_MESSAGE, openWebsiteAndObserve } from './utils/chromeMessaging.js';
 
 export default function App() {
-  // Primary frontend state machine
+  // Primary frontend task state machine: IDLE | EXECUTING | WAITING_FOR_APPROVAL | NEEDS_CLARIFICATION | COMPLETED | ERROR
   const [appState, setAppState] = useState('IDLE');
+  
+  // Independent Voice Session State Machine: STOPPED | LISTENING | PROCESSING | SPEAKING
+  const [voiceSessionState, setVoiceSessionState] = useState('STOPPED');
+  const [messages, setMessages] = useState([]);
+  const [isMuted, setIsMuted] = useState(false);
+  const [ttsError, setTtsError] = useState('');
   
   // Active task details
   const [taskTitle, setTaskTitle] = useState('Scroll down');
@@ -35,11 +44,17 @@ export default function App() {
   const [taskResult, setTaskResult] = useState(null);
   const [taskError, setTaskError] = useState('');
   const [clarificationQuestion, setClarificationQuestion] = useState('');
+  const [fallbackInfo, setFallbackInfo] = useState(null);
+  const [approvalInfo, setApprovalInfo] = useState(null);
 
   // AI Telemetry & Reasoning state
   const [plannerMode, setPlannerMode] = useState('Deterministic');
-  const [tokensUsed, setTokensUsed] = useState({ prompt: 0, completion: 0, total: 0 });
+  const [tokensUsed, setTokensUsed] = useState({ prompt: 0, completion: 0, total: 0, thinking: undefined, usageAvailable: true });
+  const [taskMetrics, setTaskMetrics] = useState(null);
   const [aiCallsCount, setAiCallsCount] = useState(0);
+  const [queuedVoiceCommand, setQueuedVoiceCommand] = useState('');
+  const [isCurrentPageRestricted, setIsCurrentPageRestricted] = useState(false);
+  const [restrictedUrl, setRestrictedUrl] = useState('');
   
   // Command & Speech Recognition state
   const [commandText, setCommandText] = useState('');
@@ -94,10 +109,11 @@ export default function App() {
     }
   }, [settings.silenceThreshold, settings.language]);
 
-  // Cleanup speech recognition, agent controller, and demo timers on unmount
+  // Cleanup speech recognition, agent controller, TTS, and demo timers on unmount
   useEffect(() => {
     return () => {
       agentController.stopTask();
+      ttsController.stop();
       if (speechRecognizerRef.current) {
         speechRecognizerRef.current.abort();
       }
@@ -112,25 +128,123 @@ export default function App() {
   };
 
   /**
+   * Speaks assistant response aloud via Web Speech API (TTS)
+   * while guarding against feedback loops.
+   */
+  const handleSpeakText = (text, onFinished) => {
+    if (!settings.voiceResponses) {
+      if (onFinished) onFinished();
+      return;
+    }
+
+    if (!isSpeechSynthesisSupported()) {
+      setVoiceError('Speech synthesis is not supported in this browser.');
+      if (handsFree) {
+        setVoiceSessionState('LISTENING');
+      } else {
+        setVoiceSessionState('STOPPED');
+      }
+      if (onFinished) onFinished();
+      return;
+    }
+
+    setVoiceSessionState('SPEAKING');
+    speechRecognizerRef.current?.setTemporarilyMuted(true);
+
+    const initiated = ttsController.speak(text, {
+      lang: settings.language || 'en-US',
+      onStart: () => {
+        setVoiceSessionState('SPEAKING');
+      },
+      onEnd: () => {
+        speechRecognizerRef.current?.setTemporarilyMuted(false);
+        if (handsFree) {
+          setVoiceSessionState('LISTENING');
+        } else {
+          setVoiceSessionState('STOPPED');
+        }
+        if (onFinished) onFinished();
+      },
+      onError: (err) => {
+        setTtsError(err);
+        speechRecognizerRef.current?.setTemporarilyMuted(false);
+        if (handsFree) {
+          setVoiceSessionState('LISTENING');
+        } else {
+          setVoiceSessionState('STOPPED');
+        }
+        if (onFinished) onFinished();
+      }
+    });
+
+    if (!initiated) {
+      speechRecognizerRef.current?.setTemporarilyMuted(false);
+      if (handsFree) {
+        setVoiceSessionState('LISTENING');
+      } else {
+        setVoiceSessionState('STOPPED');
+      }
+      if (onFinished) onFinished();
+    }
+  };
+
+  /**
+   * Stops ongoing assistant speech playback.
+   */
+  const handleStopSpeaking = () => {
+    ttsController.stop();
+    speechRecognizerRef.current?.setTemporarilyMuted(false);
+    if (handsFree) {
+      setVoiceSessionState('LISTENING');
+    } else {
+      setVoiceSessionState('STOPPED');
+    }
+  };
+
+  /**
+   * Toggles speech audio mute state.
+   */
+  const handleToggleMute = () => {
+    const nextMuted = !isMuted;
+    setIsMuted(nextMuted);
+    ttsController.setMuted(nextMuted);
+  };
+
+  /**
+   * Replays spoken message from chat bubble.
+   */
+  const handleReplaySpeech = (text) => {
+    handleSpeakText(text);
+  };
+
+  /**
+   * Intentionally stops the entire voice session.
+   */
+  const handleStopVoiceSession = () => {
+    if (speechRecognizerRef.current) {
+      speechRecognizerRef.current.stop();
+    }
+    ttsController.stop();
+    speechRecognizerRef.current?.setTemporarilyMuted(false);
+    setIsListening(false);
+    setHandsFree(false);
+    setVoiceSessionState('STOPPED');
+    setInterimTranscript('');
+    setCurrentUtterance('');
+    setIsVoiceProcessing(false);
+    if (appState === 'LISTENING') setAppState('IDLE');
+  };
+
+  /**
    * Real Hands-Free Speech Recognition Toggle Handler
    * Starts or stops continuous microphone speech-to-text.
-   * In hands-free mode, spoken instructions automatically execute
-   * after the silence threshold without clicking Send.
    */
   const handleToggleVoice = async () => {
     setVoiceError('');
 
     // If currently listening, stop recognition immediately
-    if (isListening) {
-      if (speechRecognizerRef.current) {
-        speechRecognizerRef.current.stop();
-      }
-      setIsListening(false);
-      setHandsFree(false);
-      setInterimTranscript('');
-      setCurrentUtterance('');
-      setIsVoiceProcessing(false);
-      if (appState === 'LISTENING') setAppState('IDLE');
+    if (isListening || voiceSessionState !== 'STOPPED') {
+      handleStopVoiceSession();
       return;
     }
 
@@ -158,6 +272,7 @@ export default function App() {
     // 4. Update UI to listening state
     setHandsFree(true);
     setIsListening(true);
+    setVoiceSessionState('LISTENING');
     setInterimTranscript('');
     setCurrentUtterance('');
     setIsVoiceProcessing(false);
@@ -169,6 +284,7 @@ export default function App() {
       silenceDurationMs: (settings.silenceThreshold || 2.5) * 1000,
       onStart: () => {
         setIsListening(true);
+        setVoiceSessionState('LISTENING');
         setVoiceError('');
       },
       onInterimResult: (partialText, fullText) => {
@@ -181,22 +297,26 @@ export default function App() {
         setCommandText(fullText);
       },
       onUtteranceFinalized: async (finalUtterance) => {
+        const trimmed = String(finalUtterance || '').trim();
+        if (!trimmed) return;
+
         // Step 1: Put the complete transcript into the existing command input
-        setCommandText(finalUtterance);
-        setCurrentUtterance(finalUtterance);
+        setCommandText(trimmed);
+        setCurrentUtterance(trimmed);
         setInterimTranscript('');
         setIsVoiceProcessing(true);
+        setVoiceSessionState('PROCESSING');
 
         // Step 2: Clear utterance in recognizer so next speech segment starts fresh
         if (speechRecognizerRef.current) {
           speechRecognizerRef.current.clearUtterance();
         }
 
-        // Step 3: Short Processing indicator, then auto-submit to agentController
+        // Step 3: Auto-submit to agentController (seamless two-way conversation)
         setTimeout(async () => {
           setIsVoiceProcessing(false);
-          await handleStartTask(finalUtterance);
-        }, 300);
+          await handleStartTask(trimmed);
+        }, 200);
       },
       onUtteranceCancelled: () => {
         setCurrentUtterance('');
@@ -211,6 +331,7 @@ export default function App() {
         if (isFatal) {
           setIsListening(false);
           setHandsFree(false);
+          setVoiceSessionState('STOPPED');
           if (appState === 'LISTENING') setAppState('IDLE');
           setCurrentUtterance('');
           setInterimTranscript('');
@@ -220,6 +341,7 @@ export default function App() {
         if (intentional) {
           setIsListening(false);
           setHandsFree(false);
+          setVoiceSessionState('STOPPED');
           if (appState === 'LISTENING') setAppState('IDLE');
           setCurrentUtterance('');
           setInterimTranscript('');
@@ -253,20 +375,46 @@ export default function App() {
     const trimmedQuery = String(query || '').trim();
     if (!trimmedQuery) return;
 
+    // Guard: Prevent running observer, executor, or AI planner against restricted pages
+    if (isCurrentPageRestricted) {
+      const restMsg = RESTRICTED_PAGE_MESSAGE;
+      setTaskError(restMsg);
+      setAppState('ERROR');
+      handleSpeakText(restMsg);
+      return;
+    }
+
+    // Append user message into conversation history
+    const userMsg = {
+      id: `user-${Date.now()}`,
+      role: 'user',
+      text: trimmedQuery,
+      time: new Date().toLocaleTimeString()
+    };
+    const updatedHistory = [...messages, userMsg];
+    setMessages(updatedHistory);
+
     // If hands-free is NOT active, stop the one-shot voice input
     if (!handsFree && isListening && speechRecognizerRef.current) {
       speechRecognizerRef.current.stop();
       setIsListening(false);
+      setVoiceSessionState('STOPPED');
+    } else if (handsFree) {
+      setVoiceSessionState('PROCESSING');
     }
 
     setTaskTitle(trimmedQuery);
     setTaskError('');
     setTaskActions([]);
     setTaskResult(null);
+    setApprovalInfo(null);
     setTaskDuration('0.0s');
     setClarificationQuestion('');
     setPlannerMode(settings.plannerMode === 'deterministic' ? 'Deterministic' : 'AI Hybrid');
-    setTokensUsed({ prompt: 0, completion: 0, total: 0 });
+    setTokensUsed({ prompt: 0, completion: 0, total: 0, thinking: undefined, usageAvailable: true });
+    setTaskMetrics(null);
+    setFallbackInfo(null);
+    setQueuedVoiceCommand('');
     setAiCallsCount(0);
     setTaskProgress(15);
     setAppState('EXECUTING');
@@ -281,12 +429,15 @@ export default function App() {
       await agentController.startTask(trimmedQuery, {
         plannerMode: settings.plannerMode || 'hybrid',
         enableAI: settings.plannerMode !== 'deterministic',
+        conversationHistory: updatedHistory,
         onUpdate: (snapshot) => {
           setTaskProgress(snapshot.progress);
           setTaskActions(snapshot.actions || []);
           setTaskDuration(snapshot.duration || '0.0s');
           if (snapshot.plannerMode) setPlannerMode(snapshot.plannerMode);
           if (snapshot.tokensUsed) setTokensUsed(snapshot.tokensUsed);
+          if (snapshot.taskMetrics) setTaskMetrics(snapshot.taskMetrics);
+          if (snapshot.fallbackInfo) setFallbackInfo(snapshot.fallbackInfo);
           if (typeof snapshot.aiCallsCount === 'number') setAiCallsCount(snapshot.aiCallsCount);
           if (snapshot.clarificationQuestion) setClarificationQuestion(snapshot.clarificationQuestion);
 
@@ -315,25 +466,115 @@ export default function App() {
               setAiStatus(snapshot.statusMessage || 'Verifying action outcome...');
               setAppState('EXECUTING');
               break;
-            case TaskStatus.WAITING_FOR_APPROVAL:
+            case TaskStatus.WAITING_FOR_APPROVAL: {
               setAiStatus('Awaiting user confirmation');
               setAppState('WAITING_FOR_APPROVAL');
+
+              const activeUrl = agentController.activeTabInfo?.url || restrictedUrl || 'Active page';
+              let hostname = 'Active page';
+              try {
+                if (activeUrl && activeUrl.startsWith('http')) {
+                  hostname = new URL(activeUrl).hostname;
+                } else if (activeUrl) {
+                  hostname = activeUrl;
+                }
+              } catch {}
+
+              const pendingAction = agentController.pendingApprovalAction || agentController.activeXWorkflow?.pendingApprovalAction;
+              const actionLabel = pendingAction?.targetText || pendingAction?.action || trimmedQuery;
+              const isXAction = Boolean(agentController.activeXWorkflow || pendingAction?.platform === 'x.com');
+              const details = isXAction && pendingAction?.draftText ? [
+                { label: 'Platform', value: 'X (formerly Twitter)' },
+                { label: 'Post Content', value: pendingAction.draftText },
+                { label: 'Safety Policy', value: pendingAction.step === 'publish_confirmation' ? 'Final confirmation required immediately before publishing' : 'Consequential post action requires approval' }
+              ] : [
+                { label: 'Website', value: hostname },
+                { label: 'Action', value: actionLabel },
+                { label: 'Safety Policy', value: 'Consequential action requires explicit confirmation' }
+              ];
+
+              setApprovalInfo({
+                website: isXAction ? 'x.com' : hostname,
+                actionTitle: isXAction ? (pendingAction?.step === 'publish_confirmation' ? 'Publish to X' : 'Create Post on X') : actionLabel,
+                details
+              });
+
+              const spokenPrompt = isXAction && pendingAction?.draftText
+                ? `Please confirm: ready to post "${pendingAction.draftText}" to X.`
+                : 'This sensitive action requires your confirmation.';
+              handleSpeakText(spokenPrompt);
               break;
-            case TaskStatus.NEEDS_CLARIFICATION:
+            }
+            case TaskStatus.NEEDS_CLARIFICATION: {
               setAiStatus('Needs clarification');
-              setClarificationQuestion(snapshot.clarificationQuestion || 'Please clarify your instruction.');
+              const q = snapshot.clarificationQuestion || 'Please clarify your instruction.';
+              setClarificationQuestion(q);
               setAppState('NEEDS_CLARIFICATION');
+              handleSpeakText(q);
               break;
+            }
             case TaskStatus.COMPLETED:
+            case TaskStatus.COMPLETED_WAITING_FOR_ACKNOWLEDGEMENT: {
               setAiStatus('Task completed');
               setTaskResult(snapshot.result);
               setAppState('COMPLETED');
+
+              const spoken = snapshot.result?.spokenText ||
+                (snapshot.result?.answer ? snapshot.result.answer.slice(0, 150) : '') ||
+                (snapshot.result?.title ? `${snapshot.result.title}.` : `Finished checking ${trimmedQuery}.`);
+
+              const displayText = snapshot.result?.answer ||
+                snapshot.result?.spokenText ||
+                (snapshot.result?.title ? `${snapshot.result.title}. ${snapshot.result.meta || ''}` : `Completed ${trimmedQuery}`);
+
+              setMessages((prev) => {
+                const alreadyExists = prev.some((m) => m.taskId === snapshot.taskId && m.role === 'assistant');
+                if (alreadyExists) return prev;
+                return [
+                  ...prev,
+                  {
+                    id: `asst-${snapshot.taskId || Date.now()}`,
+                    role: 'assistant',
+                    text: displayText,
+                    spokenText: spoken,
+                    title: snapshot.result?.title,
+                    meta: snapshot.result?.meta,
+                    sources: snapshot.result?.sources || [],
+                    time: new Date().toLocaleTimeString(),
+                    taskId: snapshot.taskId,
+                    result: snapshot.result
+                  }
+                ];
+              });
+
+              handleSpeakText(spoken);
               break;
-            case TaskStatus.ERROR:
+            }
+            case TaskStatus.ERROR: {
               setAiStatus('Execution error');
-              setTaskError(snapshot.error || 'Task execution failed.');
+              const errExplanation = snapshot.error || 'Task execution failed.';
+              setTaskError(errExplanation);
               setAppState('ERROR');
+
+              setMessages((prev) => {
+                const alreadyExists = prev.some((m) => m.taskId === snapshot.taskId && m.role === 'assistant');
+                if (alreadyExists) return prev;
+                return [
+                  ...prev,
+                  {
+                    id: `asst-err-${snapshot.taskId || Date.now()}`,
+                    role: 'assistant',
+                    text: errExplanation,
+                    time: new Date().toLocaleTimeString(),
+                    taskId: snapshot.taskId,
+                    isError: true
+                  }
+                ];
+              });
+
+              handleSpeakText(errExplanation);
               break;
+            }
             case TaskStatus.STOPPED:
               setAiStatus('Task stopped');
               setAppState('IDLE');
@@ -344,10 +585,52 @@ export default function App() {
         }
       });
     } catch (err) {
-      // If task submission fails, preserve query in command input for user review/edit
       setCommandText(trimmedQuery);
-      setTaskError(err.message || 'Task execution failed.');
+      const caughtErr = err.message || 'Task execution failed.';
+      setTaskError(caughtErr);
       setAppState('ERROR');
+      handleSpeakText(caughtErr);
+    }
+  };
+
+  /**
+   * Explicit user acknowledgement of completed task via "OK, Done".
+   * Dismisses the completed card and restores IDLE ready state.
+   * If a hands-free utterance was queued while reviewing, prepares it.
+   */
+  const handleAcknowledgeDone = () => {
+    setAppState('IDLE');
+    setAiStatus('Ready');
+    // Clear completed task results and reset metrics so the next task starts fresh without stale metrics
+    setTaskResult(null);
+    setTaskActions([]);
+    setTaskDuration('0.0s');
+    setAiCallsCount(0);
+    setTokensUsed({ prompt: 0, completion: 0, total: 0, thinking: undefined, usageAvailable: true });
+    setTaskMetrics(null);
+
+    if (queuedVoiceCommand) {
+      const nextCmd = queuedVoiceCommand;
+      setQueuedVoiceCommand('');
+      setCommandText(nextCmd);
+      setCurrentUtterance(nextCmd);
+    }
+  };
+
+  /**
+   * Automatically refreshes and synchronizes restricted/accessible page context.
+   */
+  const handlePageChange = (ctx) => {
+    const isRestricted = Boolean(ctx?.isRestricted);
+    setIsCurrentPageRestricted(isRestricted);
+    setRestrictedUrl(ctx?.url || '');
+    if (!isRestricted && appState === 'ERROR' && (taskError.includes('restricts extensions') || taskError.includes('restricted browser pages') || taskError.includes('restricted'))) {
+      setTaskError('');
+      setAppState('IDLE');
+    }
+    // Automatically notify agentController of tab/navigation changes (resumes pending X.com workflows)
+    if (ctx && ctx.url) {
+      agentController.handleTabUpdate(ctx);
     }
   };
 
@@ -359,18 +642,37 @@ export default function App() {
   };
 
   // Approval handlers
-  const handleApproveAction = () => {
+  const handleApproveAction = async () => {
     setAppState('EXECUTING');
-    setTaskProgress(85);
-    setAiStatus('Finalizing transaction steps');
-    setTimeout(() => {
-      setAppState('COMPLETED');
-      setAiStatus('Task completed');
-    }, 1500);
+    setAiStatus('Processing approved action...');
+    try {
+      const snap = await agentController.approvePendingAction();
+      if (snap) {
+        if (snap.status === TaskStatus.COMPLETED) {
+          setAppState('COMPLETED');
+          setTaskResult(snap.result);
+          setAiStatus('Task completed');
+        } else if (snap.status === TaskStatus.WAITING_FOR_APPROVAL) {
+          setAppState('WAITING_FOR_APPROVAL');
+          setAiStatus('Awaiting final confirmation');
+        } else if (snap.status === TaskStatus.ERROR) {
+          setAppState('ERROR');
+          setTaskError(snap.error || 'Failed to execute approved action');
+        } else if (snap.status === TaskStatus.STOPPED) {
+          setAppState('IDLE');
+          setAiStatus('Task stopped');
+        }
+      }
+    } catch (err) {
+      setAppState('ERROR');
+      setTaskError(`Approval error: ${err.message}`);
+    }
   };
 
   const handleCancelApproval = () => {
+    agentController.cancelPendingAction();
     setAppState('IDLE');
+    setAiStatus('Action cancelled');
   };
 
   // Auto-play demo flow for hackathon presentation / evaluation
@@ -435,12 +737,28 @@ export default function App() {
       />
 
       {/* Browser Page Context */}
-      <PageContext />
+      <PageContext onPageChange={handlePageChange} />
 
       {/* Main Dynamic Workspace */}
       <main className="main-content">
-        {/* State 1: IDLE */}
-        {appState === 'IDLE' && (
+        {/* Two-Way Conversational Voice View */}
+        {(messages.length > 0 || voiceSessionState !== 'STOPPED') && (
+          <ConversationView
+            voiceState={voiceSessionState}
+            messages={messages}
+            currentUtterance={currentUtterance}
+            interimTranscript={interimTranscript}
+            isMuted={isMuted}
+            onToggleMute={handleToggleMute}
+            onStopSpeaking={handleStopSpeaking}
+            onToggleVoice={handleToggleVoice}
+            onReplaySpeech={handleReplaySpeech}
+            onClearHistory={() => setMessages([])}
+          />
+        )}
+
+        {/* State 1: IDLE (When conversation is empty and voice session stopped) */}
+        {appState === 'IDLE' && messages.length === 0 && voiceSessionState === 'STOPPED' && (
           <>
             <EmptyState onSelectSuggestion={handleStartTask} />
             <VoiceButton
@@ -452,29 +770,6 @@ export default function App() {
               error={voiceError}
             />
           </>
-        )}
-
-        {/* State 2: LISTENING */}
-        {appState === 'LISTENING' && (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: 30 }}>
-            <AIStatusPill
-              status={isVoiceProcessing ? 'Submitting instruction...' : 'Hands-Free: Speak a command...'}
-              label="Voice Input"
-            />
-            <div style={{ marginTop: 24 }}>
-              <VoiceButton
-                isListening={true}
-                onToggleVoice={handleToggleVoice}
-                onCancelUtterance={handleCancelUtterance}
-                transcription={currentUtterance || interimTranscript || 'Listening for your command...'}
-                isProcessing={isVoiceProcessing}
-                error={voiceError}
-              />
-            </div>
-            <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 20 }}>
-              Auto-submits after pause • Speak your next instruction anytime
-            </p>
-          </div>
         )}
 
         {/* State 3: THINKING */}
@@ -513,6 +808,8 @@ export default function App() {
               status={aiStatus}
               tokens={tokensUsed}
               aiCalls={aiCallsCount}
+              taskMetrics={taskMetrics}
+              fallbackInfo={fallbackInfo}
             />
           </div>
         )}
@@ -526,12 +823,14 @@ export default function App() {
               progress={80}
               onStopTask={handleStopTask}
             />
-            {settings.showTimeline && <ActionTimeline />}
+            {settings.showTimeline && <ActionTimeline actions={taskActions} />}
             <ApprovalModal
               isOpen={true}
               onApprove={handleApproveAction}
               onCancel={handleCancelApproval}
-              website="active page"
+              website={approvalInfo?.website || 'Active page'}
+              actionTitle={approvalInfo?.actionTitle || 'Action requires approval'}
+              details={approvalInfo?.details || []}
             />
           </div>
         )}
@@ -551,7 +850,7 @@ export default function App() {
               progress={55}
               onStopTask={handleStopTask}
             />
-            {settings.showTimeline && <ActionTimeline />}
+            {settings.showTimeline && <ActionTimeline actions={taskActions} />}
           </div>
         )}
 
@@ -603,24 +902,21 @@ export default function App() {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <AIStatusPill status="Task completed" label={plannerMode.startsWith('AI') ? 'AI Planning Layer' : 'Deterministic Planner'} />
             <TaskCompleted
-              onNewTask={() => {
-                setAppState('IDLE');
-                setCommandText('');
-                setCurrentUtterance('');
-              }}
+              onDone={handleAcknowledgeDone}
+              onNewTask={handleAcknowledgeDone}
               title="Task completed"
               description={`Successfully executed and verified: "${taskTitle}"`}
               resultSummary={taskResult}
               duration={taskDuration}
               actionCount={taskActions.length}
-            />
-            <Metrics
-              time={taskDuration}
-              actions={String(taskActions.length)}
-              mode={plannerMode}
-              status="Verified"
+              actions={taskActions}
+              plannerMode={plannerMode}
               tokens={tokensUsed}
               aiCalls={aiCallsCount}
+              taskMetrics={taskMetrics}
+              fallbackInfo={fallbackInfo}
+              queuedUtterance={queuedVoiceCommand}
+              onClearQueued={() => setQueuedVoiceCommand('')}
             />
             {settings.showTimeline && taskActions.length > 0 && (
               <ActionTimeline actions={taskActions} />
@@ -652,14 +948,29 @@ export default function App() {
                 >
                   Dismiss
                 </button>
-                <button
-                  type="button"
-                  className="btn-primary"
-                  style={{ flex: 1 }}
-                  onClick={() => handleStartTask(taskTitle)}
-                >
-                  Retry Task
-                </button>
+                {(isCurrentPageRestricted || taskError.includes('restricts extensions') || taskError.includes('restricted')) ? (
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    style={{ flex: 1 }}
+                    onClick={async () => {
+                      setAppState('IDLE');
+                      setTaskError('');
+                      await openWebsiteAndObserve('https://www.wikipedia.org');
+                    }}
+                  >
+                    Open a Website
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    style={{ flex: 1 }}
+                    onClick={() => handleStartTask(taskTitle)}
+                  >
+                    Retry Task
+                  </button>
+                )}
               </div>
             </div>
             {settings.showTimeline && taskActions.length > 0 && (
@@ -676,10 +987,10 @@ export default function App() {
         onSubmitCommand={handleStartTask}
         onToggleVoice={handleToggleVoice}
         onCancelUtterance={handleCancelUtterance}
-        isListening={isListening}
+        isListening={isListening || voiceSessionState !== 'STOPPED'}
         handsFree={handsFree}
         transcriptionPreview={currentUtterance || interimTranscript}
-        isProcessing={isVoiceProcessing}
+        isProcessing={isVoiceProcessing || voiceSessionState === 'PROCESSING'}
       />
 
       {/* Settings Modal */}

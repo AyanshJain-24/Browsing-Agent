@@ -30,8 +30,8 @@ const LIMITS = {
   MAX_TABLE_CELL_LENGTH: 60, // Maximum string length per cell
   MAX_IMAGES: 10,            // Relevant descriptive images
   MAX_INPUTS: 30,            // Comprehensive form field coverage
-  MAX_BUTTONS: 25,           // Major interactive call-to-actions
-  MAX_LINKS: 50,             // Compact, intelligently ranked links
+  MAX_BUTTONS: 60,           // Major interactive call-to-actions, menus, and filter options
+  MAX_LINKS: 60,             // Compact, intelligently ranked links
   MAX_FORMS: 5               // Form blocks on page
 };
 
@@ -95,8 +95,16 @@ function normalizeText(text, maxLength = 0) {
  * @param {Element} element
  * @returns {boolean}
  */
-function isVisible(element) {
+export function isVisible(element) {
   if (!element || !(element instanceof Element)) return false;
+
+  // Check hidden and aria-hidden attributes
+  if (element.getAttribute('aria-hidden') === 'true' || element.hasAttribute('hidden')) {
+    return false;
+  }
+  if (element.closest('[aria-hidden="true"], [hidden]')) {
+    return false;
+  }
 
   // Modern browser API for comprehensive visibility detection
   if (typeof element.checkVisibility === 'function') {
@@ -118,6 +126,125 @@ function isVisible(element) {
 
   const rect = element.getBoundingClientRect();
   return rect.width > 0 && rect.height > 0;
+}
+
+/**
+ * Traverses selector across document tree and any open shadow roots.
+ * Allows reliable observation of controls inside web components (e.g. YouTube masthead, custom profile buttons).
+ * @param {string} selector
+ * @param {Document|Element|ShadowRoot} root
+ * @returns {Array<Element>}
+ */
+export function querySelectorAllDeep(selector, root = document) {
+  const results = [];
+  if (!root) return results;
+
+  try {
+    const direct = root.querySelectorAll(selector);
+    for (let i = 0; i < direct.length; i++) {
+      results.push(direct[i]);
+    }
+  } catch {
+    // Gracefully ignore selector issues
+  }
+
+  try {
+    const all = root.querySelectorAll('*');
+    for (let i = 0; i < all.length; i++) {
+      const node = all[i];
+      if (node && node.shadowRoot) {
+        const shadowItems = querySelectorAllDeep(selector, node.shadowRoot);
+        for (let j = 0; j < shadowItems.length; j++) {
+          results.push(shadowItems[j]);
+        }
+      }
+    }
+  } catch {
+    // Cross-origin / security boundary fallback
+  }
+
+  return results;
+}
+
+/**
+ * Calculates the accessible name for an element following W3C AccName principles:
+ * 1. aria-labelledby
+ * 2. aria-label
+ * 3. Icon ligature detection & title fallback
+ * 4. Embedded img alt or svg title/aria-label
+ * 5. Text content
+ * 6. Fallback title/value
+ * 
+ * @param {Element} el
+ * @returns {string} Normalized accessible name
+ */
+export function getElementAccessibleName(el) {
+  if (!el || !(el instanceof Element)) return '';
+
+  // 1. aria-labelledby
+  const labelledBy = el.getAttribute('aria-labelledby');
+  if (labelledBy) {
+    const ids = labelledBy.trim().split(/\s+/);
+    const parts = [];
+    for (const id of ids) {
+      const refNode = document.getElementById(id) || (el.getRootNode ? el.getRootNode()?.getElementById?.(id) : null);
+      if (refNode) {
+        const partText = normalizeText(refNode.textContent, 80);
+        if (partText) parts.push(partText);
+      }
+    }
+    if (parts.length > 0) {
+      return parts.join(' ');
+    }
+  }
+
+  // 2. Direct aria-label
+  const ariaLabel = el.getAttribute('aria-label');
+  if (ariaLabel && ariaLabel.trim()) {
+    return normalizeText(ariaLabel, 80);
+  }
+
+  // 3. Child img with alt
+  const imgWithAlt = el.querySelector('img[alt]');
+  if (imgWithAlt && imgWithAlt.getAttribute('alt')?.trim()) {
+    return normalizeText(imgWithAlt.getAttribute('alt'), 80);
+  }
+
+  // 4. Child SVG with title or aria-label
+  const svgTitle = el.querySelector('svg title');
+  if (svgTitle && svgTitle.textContent?.trim()) {
+    return normalizeText(svgTitle.textContent, 80);
+  }
+  const svgAria = el.querySelector('svg[aria-label]');
+  if (svgAria && svgAria.getAttribute('aria-label')?.trim()) {
+    return normalizeText(svgAria.getAttribute('aria-label'), 80);
+  }
+
+  // 5. Text content or innerText
+  const rawText = normalizeText(el.innerText || el.textContent || '', 80);
+  const titleAttr = normalizeText(el.getAttribute('title') || '', 80);
+
+  // Check if text looks like an icon font ligature (Material icons, FontAwesome glyphs)
+  const isIconLigature = /^(?:account_circle|person|user|profile|menu|more_vert|more_horiz|settings|search|close|expand_more|expand_less|apps|notifications|filter_list|tune|tune_outlined|login|logout)$/i.test(rawText);
+
+  if (titleAttr && (!rawText || isIconLigature)) {
+    return titleAttr;
+  }
+
+  if (rawText && !isIconLigature) {
+    return rawText;
+  }
+
+  if (titleAttr) {
+    return titleAttr;
+  }
+
+  const valAttr = normalizeText(el.getAttribute('value') || '', 80);
+  if (valAttr) {
+    return valAttr;
+  }
+
+  return rawText || '';
 }
 
 /**
@@ -426,22 +553,33 @@ function extractImages() {
  */
 function extractInputs() {
   const inputs = [];
-  const inputElements = document.querySelectorAll('input, textarea, select');
+  const inputElements = querySelectorAllDeep(
+    'input, textarea, select, [contenteditable="true"], [role="textbox"]',
+    document
+  );
 
   for (const el of inputElements) {
-    const rawType = (el.getAttribute('type') || el.tagName.toLowerCase()).toLowerCase();
+    const isContentEditable = Boolean(el.isContentEditable || el.getAttribute('contenteditable') === 'true');
+    const isRoleTextbox = el.getAttribute('role') === 'textbox';
+    const rawType = (isContentEditable || isRoleTextbox)
+      ? 'contenteditable'
+      : (el.getAttribute('type') || el.tagName.toLowerCase()).toLowerCase();
+
     // Ignore non-input hidden types, submit buttons (captured in extractButtons)
     if (rawType === 'hidden' || rawType === 'submit' || rawType === 'button') continue;
     if (!isVisible(el)) continue;
 
     const id = registerElement(el);
     const label = getAssociatedLabel(el);
-    const placeholder = normalizeText(el.getAttribute('placeholder') || '', 80);
+    const placeholder = normalizeText(el.getAttribute('placeholder') || el.getAttribute('data-placeholder') || '', 80);
     const name = el.getAttribute('name') || '';
+    const dataTestId = el.getAttribute('data-testid') || undefined;
 
     // Handle values appropriately by field type
     let value = '';
-    if (rawType === 'checkbox' || rawType === 'radio') {
+    if (isContentEditable || isRoleTextbox) {
+      value = normalizeText(el.innerText || el.textContent || '', 60);
+    } else if (rawType === 'checkbox' || rawType === 'radio') {
       value = el.checked ? 'checked' : 'unchecked';
     } else if (el.tagName.toLowerCase() === 'select') {
       const selectedOption = el.options[el.selectedIndex];
@@ -460,6 +598,7 @@ function extractInputs() {
       label,
       placeholder,
       value,
+      dataTestId,
       disabled: Boolean(el.disabled),
       required: Boolean(el.required)
     });
@@ -475,35 +614,95 @@ function extractInputs() {
  * @returns {Array<Object>}
  */
 function extractButtons() {
-  const buttons = [];
-  const buttonElements = document.querySelectorAll(
-    'button, input[type="button"], input[type="submit"], [role="button"]'
-  );
+  const buttonSelector =
+    'button, input[type="button"], input[type="submit"], [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="option"], [role="tab"], [role="checkbox"], ytd-search-filter-renderer, tp-yt-paper-item, [aria-haspopup]';
 
-  for (const el of buttonElements) {
-    if (!isVisible(el)) continue;
+  const menuContainerSelector =
+    '[role="menu"], [role="dialog"], [role="listbox"], ytd-search-sub-menu-renderer, #filter-menu, #collapsible, .filter-menu, .dropdown-menu';
 
-    const text = normalizeText(
-      el.textContent || el.getAttribute('aria-label') || el.getAttribute('value') || '',
-      80
-    );
+  const seenElements = new Set();
+  const candidateElements = [];
 
-    // Skip empty icon-less buttons with no accessible name
-    if (!text) continue;
-
-    const id = registerElement(el);
-    buttons.push({
-      id,
-      tag: el.tagName.toLowerCase(),
-      text,
-      ariaLabel: normalizeText(el.getAttribute('aria-label') || '', 80),
-      disabled: Boolean(el.disabled)
-    });
-
-    if (buttons.length >= LIMITS.MAX_BUTTONS) break;
+  // 1. First collect items from visible menu containers so dynamic menu items are prioritized
+  const menuContainers = querySelectorAllDeep(menuContainerSelector, document);
+  for (const container of menuContainers) {
+    if (!isVisible(container)) continue;
+    const items = querySelectorAllDeep('button, a, [role], ytd-search-filter-renderer, tp-yt-paper-item, .yt-simple-endpoint', container);
+    for (const item of items) {
+      if (!seenElements.has(item)) {
+        seenElements.add(item);
+        candidateElements.push(item);
+      }
+    }
   }
 
-  return buttons;
+  // 2. Collect all other buttons across the page, traversing open shadow roots
+  const pageButtons = querySelectorAllDeep(buttonSelector, document);
+  for (const el of pageButtons) {
+    if (!seenElements.has(el)) {
+      seenElements.add(el);
+      candidateElements.push(el);
+    }
+  }
+
+  const inMenuButtons = [];
+  const generalButtons = [];
+
+  for (const el of candidateElements) {
+    if (!isVisible(el)) continue;
+
+    const accessibleName = getElementAccessibleName(el);
+    const dataTestId = el.getAttribute('data-testid') || undefined;
+
+    // Skip empty icon-less buttons with no accessible name
+    if (!accessibleName && !dataTestId) continue;
+
+    const inMenu = Boolean(el.closest && el.closest(menuContainerSelector));
+
+    const isSelected = Boolean(
+      el.getAttribute('aria-selected') === 'true' ||
+      el.getAttribute('aria-checked') === 'true' ||
+      el.classList?.contains('selected') ||
+      el.classList?.contains('iron-selected') ||
+      el.hasAttribute('selected')
+    );
+
+    const isDisabled = Boolean(
+      el.disabled ||
+      el.getAttribute('aria-disabled') === 'true' ||
+      el.closest?.('fieldset[disabled]')
+    );
+
+    const title = normalizeText(el.getAttribute('title') || '', 80);
+    const ariaLabel = normalizeText(el.getAttribute('aria-label') || '', 80);
+    const ariaHasPopup = el.getAttribute('aria-haspopup');
+    const ariaExpanded = el.getAttribute('aria-expanded');
+
+    const id = registerElement(el);
+    const item = {
+      id,
+      tag: el.tagName.toLowerCase(),
+      text: accessibleName || dataTestId || '',
+      ariaLabel: ariaLabel || undefined,
+      title: title || undefined,
+      dataTestId,
+      disabled: isDisabled,
+      role: el.getAttribute('role') || (inMenu ? 'menuitem' : undefined),
+      ...(ariaHasPopup ? { ariaHasPopup } : {}),
+      ...(ariaExpanded ? { ariaExpanded } : {}),
+      ...(inMenu ? { inMenu: true } : {}),
+      ...(isSelected ? { selected: true } : {})
+    };
+
+    if (inMenu) {
+      inMenuButtons.push(item);
+    } else {
+      generalButtons.push(item);
+    }
+  }
+
+  // Prioritize active menu items so they are never dropped when a menu is open
+  return [...inMenuButtons, ...generalButtons].slice(0, LIMITS.MAX_BUTTONS);
 }
 
 /**
@@ -522,7 +721,7 @@ function extractButtons() {
  * @returns {{ links: Array<Object>, totalLinks: number, returnedLinks: number }}
  */
 function extractLinks() {
-  const allLinkElements = document.querySelectorAll('a[href]');
+  const allLinkElements = querySelectorAllDeep('a[href]', document);
   let totalValidLinks = 0;
 
   const candidates = [];
@@ -544,10 +743,7 @@ function extractLinks() {
       continue;
     }
 
-    const text = normalizeText(
-      el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '',
-      80
-    );
+    const text = getElementAccessibleName(el);
     // Ignore completely empty links with no readable text or accessible description
     if (!text) continue;
 
@@ -575,19 +771,19 @@ function extractLinks() {
     let score = 10; // Baseline score for any visible, non-empty link
 
     // 1. Content priority: Links inside <main>, <article>, or [role="main"]
-    const insideMain = Boolean(el.closest('main, article, [role="main"]'));
+    const insideMain = Boolean(el.closest && el.closest('main, article, [role="main"]'));
     if (insideMain) score += 25;
 
     // 2. Navigation bar priority: Links inside <nav> or <header> are useful for site navigation
-    const insideNav = Boolean(el.closest('nav, header, [role="navigation"]'));
+    const insideNav = Boolean(el.closest && el.closest('nav, header, [role="navigation"]'));
     if (insideNav) score += 10;
 
     // 3. Footer deprioritization: Legal disclaimers, privacy policy, copyright in footer
-    const insideFooter = Boolean(el.closest('footer, [role="contentinfo"]'));
+    const insideFooter = Boolean(el.closest && el.closest('footer, [role="contentinfo"]'));
     if (insideFooter) score -= 20;
 
     // 4. Sidebar / aside slight deprioritization
-    const insideAside = Boolean(el.closest('aside, [role="complementary"]'));
+    const insideAside = Boolean(el.closest && el.closest('aside, [role="complementary"]'));
     if (insideAside) score -= 5;
 
     // 5. Social sharing boilerplate detection
@@ -606,6 +802,10 @@ function extractLinks() {
       text,
       href: fullHref,
       ariaLabel: normalizeText(el.getAttribute('aria-label') || '', 80),
+      title: normalizeText(el.getAttribute('title') || '', 80),
+      role: el.getAttribute('role') || undefined,
+      ariaHasPopup: el.getAttribute('aria-haspopup') || undefined,
+      ariaExpanded: el.getAttribute('aria-expanded') || undefined,
       score
     });
   }
@@ -621,7 +821,11 @@ function extractLinks() {
     text: candidate.text,
     href: candidate.href,
     visible: true,
-    ariaLabel: candidate.ariaLabel || undefined
+    ariaLabel: candidate.ariaLabel || undefined,
+    title: candidate.title || undefined,
+    role: candidate.role || undefined,
+    ariaHasPopup: candidate.ariaHasPopup || undefined,
+    ariaExpanded: candidate.ariaExpanded || undefined
   }));
 
   return {

@@ -105,15 +105,33 @@ export function validateAIPlanResponse(rawText) {
 
   const plan = {
     status: rawStatus,
-    explanation: String(parsed.explanation || '').slice(0, 200),
+    explanation: String(parsed.explanation || '').slice(0, 1000),
     isLastStep: Boolean(parsed.isLastStep)
   };
 
   // 2. Handle non-ACTION statuses
   if (rawStatus === 'DONE') {
-    plan.result = parsed.result && typeof parsed.result === 'object'
-      ? parsed.result
-      : { title: parsed.explanation || 'Task completed' };
+    let resultObj = {};
+    if (parsed.result && typeof parsed.result === 'object' && !Array.isArray(parsed.result)) {
+      resultObj = { ...parsed.result };
+    } else if (typeof parsed.result === 'string') {
+      resultObj = { title: parsed.result, answer: parsed.result };
+    }
+
+    if (!resultObj.title) {
+      resultObj.title = resultObj.heading || parsed.explanation || 'Task completed';
+    }
+    if (!resultObj.answer && parsed.answer) {
+      resultObj.answer = String(parsed.answer);
+    }
+    if (!resultObj.answer && parsed.explanation && parsed.explanation !== resultObj.title) {
+      resultObj.answer = String(parsed.explanation);
+    }
+    if (!resultObj.meta && parsed.meta) {
+      resultObj.meta = String(parsed.meta);
+    }
+
+    plan.result = resultObj;
     return { valid: true, plan };
   }
 

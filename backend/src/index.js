@@ -10,12 +10,27 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import { existsSync } from 'fs';
 import { createAIRouter } from './ai/aiRouter.js';
 
-// Load environment variables from .env if present
+// Resolve and load environment variables from backend/.env or root .env
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-dotenv.config({ path: join(__dirname, '../.env') });
+const backendEnvPath = join(__dirname, '../.env');
+const rootEnvPath = join(__dirname, '../../.env');
+
+let resolvedEnvPath = 'none';
+if (existsSync(backendEnvPath)) {
+  dotenv.config({ path: backendEnvPath });
+  resolvedEnvPath = backendEnvPath;
+} else if (existsSync(rootEnvPath)) {
+  dotenv.config({ path: rootEnvPath });
+  resolvedEnvPath = rootEnvPath;
+} else {
+  dotenv.config();
+  resolvedEnvPath = 'default';
+}
+process.env.RESOLVED_ENV_PATH = resolvedEnvPath;
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3001', 10);
@@ -111,8 +126,21 @@ app.use((err, req, res, next) => {
 // Start listening if run directly
 if (process.env.NODE_ENV !== 'test') {
   const server = app.listen(PORT, () => {
+    const hasKey = Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim() !== '');
+    const isPlaceholder = process.env.GEMINI_API_KEY === 'your_gemini_api_key_here';
     console.log(`[Voice Browser Agent Backend] Server running on http://localhost:${PORT}`);
     console.log(`[Voice Browser Agent Backend] Active AI Provider: ${process.env.AI_PROVIDER || 'gemini'}`);
+    console.log(`[Voice Browser Agent Backend] Diagnostics: .env path: ${process.env.RESOLVED_ENV_PATH} | GEMINI_API_KEY set: ${hasKey} | placeholder: ${isPlaceholder}`);
+  });
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`\n[Voice Browser Agent Backend] ERROR: Port ${PORT} is already in use.`);
+      console.error(`Please stop the process using port ${PORT} or run 'taskkill /PID <PID> /F'.\n`);
+      process.exit(1);
+    } else {
+      console.error('[Voice Browser Agent Backend] Server error:', err);
+    }
   });
 
   const shutdown = () => {

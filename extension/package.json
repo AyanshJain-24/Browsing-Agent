@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node test/deterministicAgent.test.mjs && node test/voiceCommand.test.mjs && node test/llmReasoningAgent.test.mjs"
+    "test": "node test/deterministicAgent.test.mjs && node test/voiceCommand.test.mjs && node test/llmReasoningAgent.test.mjs && node test/conversationalVoiceAgent.test.mjs && node test/webResearchAgent.test.mjs && node test/xPostingWorkflow.test.mjs && node test/youtubeFilterWorkflow.test.mjs && node test/accountDetectionWorkflow.test.mjs && node test/liveResearchAndVoice.test.mjs && node test/reliabilityAndSafety.test.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",
